@@ -1,12 +1,13 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { useSearchParams } from 'next/navigation'
+import { useSearchParams, useRouter } from 'next/navigation'
 
 interface Property {
   type: 'studio' | 'apartment' | 'house' | 'townhouse' | 'basement'
   bedrooms: number
   hasStairs: boolean
+  numberOfFlights?: number
   hasElevator?: boolean
   elevatorReserved?: boolean
   distance?: number
@@ -26,8 +27,10 @@ const mockCompany: Company = {
 }
 
 export default function BookingPage({ params }: { params: { companyId: string } }) {
+  const router = useRouter()
   const searchParams = useSearchParams()
   const initialMovers = Number(searchParams.get('movers')) || 2
+  const selectedTimePeriod = searchParams.get('timePeriod') as 'morning' | 'afternoon' | 'evening'
 
   const [serviceType, setServiceType] = useState('')
   const [hours, setHours] = useState(2)
@@ -42,95 +45,122 @@ export default function BookingPage({ params }: { params: { companyId: string } 
     distance: 0
   })
   const [estimatedHours, setEstimatedHours] = useState<number | null>(null)
+  const [estimationBreakdown, setEstimationBreakdown] = useState<string[]>([])
 
   const calculateEstimatedHours = (property: Property) => {
-    let baseHours = 0
+    let baseHours = 0;
+    let breakdown: string[] = [];
+
+    // Base hours based on number of bedrooms (converted to sq ft)
+    const sqFtRanges = {
+      1: { min: 0, max: 800 },      // 1 bedroom
+      2: { min: 800, max: 1000 },   // 2 bedrooms
+      3: { min: 1000, max: 1500 },  // 3 bedrooms
+      4: { min: 1500, max: 2000 },  // 4 bedrooms
+      5: { min: 2001, max: 3000 },  // 5 bedrooms
+      6: { min: 3000, max: 4000 },  // 6 bedrooms
+      7: { min: 4000, max: Infinity } // 7+ bedrooms
+    };
+
+    const timeEstimates = {
+      'under800': { 2: 2, 3: 2, 4: null },
+      '800-1000': { 2: 2, 3: 2, 4: null },
+      '1000-1500': { 2: 3, 3: 2.5, 4: 2 },
+      '1500-2000': { 2: 4, 3: 3.5, 4: 2.5 },
+      '2001-3000': { 2: 6, 3: 4.5, 4: 3.5 },
+      '3000-4000': { 2: 7, 3: 5.5, 4: 4.5 },
+      '4000+': { 2: 10, 3: 9, 4: 7 }
+    };
+
+    // Get square footage range based on number of bedrooms
+    const bedrooms = property.type === 'studio' ? 1 : property.bedrooms;
+    const sqFtRange = sqFtRanges[bedrooms as keyof typeof sqFtRanges];
     
-    // Base time considering property type and bedrooms
-    if (property.type === 'studio') {
-      baseHours = 1.5 // Base time for studio
-    } else {
-      baseHours = 2 + (property.bedrooms * 0.5) // 30 min per bedroom
+    // Determine which time estimate to use
+    let timeRange = 'under800';
+    if (sqFtRange.max > 4000) timeRange = '4000+';
+    else if (sqFtRange.max > 3000) timeRange = '3000-4000';
+    else if (sqFtRange.max > 2000) timeRange = '2001-3000';
+    else if (sqFtRange.max > 1500) timeRange = '1500-2000';
+    else if (sqFtRange.max > 1000) timeRange = '1000-1500';
+    else if (sqFtRange.max > 800) timeRange = '800-1000';
+
+    // Get base hours from the time estimates table
+    const estimates = timeEstimates[timeRange as keyof typeof timeEstimates];
+    baseHours = estimates[numberOfMovers as keyof typeof estimates] || 2;
+    breakdown.push(`Base estimate for ${bedrooms} bedroom(s): ${baseHours} hours`);
+
+    // Adjust time based on service type
+    if (serviceType === 'loading') {
+      // Loading takes 20% more time due to truck packing
+      const additionalTime = baseHours * 0.2;
+      baseHours += additionalTime;
+      breakdown.push(`Additional time for loading/packing truck: +${additionalTime.toFixed(1)} hours`);
+    } else if (serviceType === 'unloading') {
+      // Unloading is 10% faster as items are already packed
+      const reduction = baseHours * 0.1;
+      baseHours -= reduction;
+      breakdown.push(`Time reduction for unloading only: -${reduction.toFixed(1)} hours`);
+    } else if (serviceType === 'loading-unloading') {
+      // Double the base time for both operations plus 20% for loading
+      const loadingTime = baseHours * 1.2; // Base + 20% for loading
+      const unloadingTime = baseHours; // Base time for unloading
+      baseHours = loadingTime + unloadingTime;
+      breakdown.push(`Loading time (including packing): ${loadingTime.toFixed(1)} hours`);
+      breakdown.push(`Unloading time: ${unloadingTime.toFixed(1)} hours`);
     }
 
-    // Adjust for property type specifics
-    switch (property.type) {
-      case 'house':
-        baseHours += 0.5
-        break
-      case 'townhouse':
-        baseHours += 0.25
-        break
-    }
-
-    // Elevator and stairs factors
-    if (property.type === 'apartment' || property.type === 'studio') {
-      if (!property.hasElevator) {
-        baseHours += 0.5
-      } else if (!property.elevatorReserved) {
-        baseHours += 0.25
+    // Add time for carry distance
+    if (property.distance) {
+      if (property.distance >= 50) {
+        baseHours += 1.5; // 1-2 hours for 50+ ft
+        breakdown.push('Long carry distance (50+ ft): +1.5 hours');
+      } else if (property.distance >= 20) {
+        baseHours += 0.75; // 0.5-1 hour for 20-50 ft
+        breakdown.push('Medium carry distance (20-50 ft): +0.75 hours');
       }
     }
 
-    // Stairs factor
-    if (property.hasStairs) {
-      baseHours += 0.5
+    // Add time for stairs/elevator
+    if (property.hasStairs && property.numberOfFlights) {
+      const stairsTime = property.numberOfFlights * 0.5; // 0.5 hour per flight
+      baseHours += stairsTime;
+      breakdown.push(`Stairs (${property.numberOfFlights} flights): +${stairsTime} hours`);
+    } else if (property.hasElevator && !property.elevatorReserved) {
+      baseHours += 0.5; // 0.5 hour for unreserved elevator
+      breakdown.push('Unreserved elevator: +0.5 hours');
     }
 
-    // Service type adjustments
-    switch (serviceType) {
-      case 'loading':
-        baseHours *= 1.1
-        break
-      case 'unloading':
-        baseHours *= 0.9
-        break
-      case 'loading-unloading':
-        baseHours *= 2 // Double for both operations
-        if (property.distance) {
-          // Add travel time based on distance:
-          // 0-15km: +0.5 hour
-          // 16-30km: +1 hour
-          // 31-50km: +1.5 hours
-          // 50km+: +2 hours
-          if (property.distance <= 15) {
-            baseHours += 0.5
-          } else if (property.distance <= 30) {
-            baseHours += 1
-          } else if (property.distance <= 50) {
-            baseHours += 1.5
-          } else {
-            baseHours += 2
-          }
-        }
-        break
-    }
-
-    // Adjust for number of movers
-    if (numberOfMovers !== 2) {
-      const efficiency = {
-        3: 0.4,
-        4: 0.3,
-        5: 0.2
+    // For loading & unloading, add drive time
+    if (serviceType === 'loading-unloading' && property.distance) {
+      if (property.distance <= 40) {
+        baseHours += 0.5;
+        breakdown.push('Drive time (10-40 miles): +0.5 hours');
+      } else if (property.distance <= 75) {
+        baseHours += 1.5;
+        breakdown.push('Drive time (40-75 miles): +1.5 hours');
+      } else if (property.distance <= 100) {
+        baseHours += 2.5;
+        breakdown.push('Drive time (75-100 miles): +2.5 hours');
       }
-      
-      let timeReduction = 0
-      for (let i = 3; i <= numberOfMovers; i++) {
-        timeReduction += efficiency[i as keyof typeof efficiency]
-      }
-      
-      baseHours = baseHours / (1 + timeReduction)
     }
 
-    return Math.max(2, Math.floor(baseHours))
+    // Ensure minimum of 2 hours
+    const finalHours = Math.max(2, Math.ceil(baseHours));
+    
+    return {
+      hours: finalHours,
+      breakdown
+    };
   }
 
   // Effect to update hours when any factor changes
   useEffect(() => {
-    const estimated = calculateEstimatedHours(property)
-    setEstimatedHours(estimated)
-    setHours(estimated)
-  }, [property, serviceType, numberOfMovers])
+    const estimate = calculateEstimatedHours(property);
+    setEstimatedHours(estimate.hours);
+    setHours(estimate.hours);
+    setEstimationBreakdown(estimate.breakdown);
+  }, [property, serviceType, numberOfMovers]);
 
   const handlePropertyChange = (updates: Partial<Property>) => {
     setProperty(prev => ({ ...prev, ...updates }))
@@ -142,17 +172,19 @@ export default function BookingPage({ params }: { params: { companyId: string } 
 
   const handleEstimatorSubmit = (e: React.FormEvent) => {
     e.preventDefault()
-    const estimated = calculateEstimatedHours(property)
-    setEstimatedHours(estimated)
-    setHours(estimated)
+    const estimate = calculateEstimatedHours(property)
+    setEstimatedHours(estimate.hours)
+    setHours(estimate.hours)
+    setEstimationBreakdown(estimate.breakdown)
   }
 
   const handleMoversChange = (newMovers: number) => {
     setNumberOfMovers(newMovers)
     if (estimatedHours) {
       const newEstimate = calculateEstimatedHours(property)
-      setEstimatedHours(newEstimate)
-      setHours(newEstimate)
+      setEstimatedHours(newEstimate.hours)
+      setHours(newEstimate.hours)
+      setEstimationBreakdown(newEstimate.breakdown)
     }
   }
 
@@ -172,9 +204,38 @@ export default function BookingPage({ params }: { params: { companyId: string } 
     setProperty(prev => ({ ...prev, distance: Math.max(1, (prev.distance || 0) - 1) }))
   }
 
+  const handleBookingConfirm = () => {
+    if (!serviceType) {
+      alert('Please select a service type')
+      return
+    }
+
+    // Get the date and time period from search params
+    const params = new URLSearchParams({
+      serviceType,
+      date: searchParams.get('date') || '',
+      timePeriod: selectedTimePeriod || 'morning',
+      helpers: numberOfMovers.toString(),
+      companyName: mockCompany.name
+    })
+
+    router.push(`/booking/confirm-details?${params.toString()}`)
+  }
+
   return (
     <main className="container mx-auto px-4 py-8">
       <div className="max-w-3xl mx-auto">
+        {/* Back Button */}
+        <button
+          onClick={() => router.back()}
+          className="mb-4 text-blue-600 hover:text-blue-800 flex items-center gap-2"
+        >
+          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+          </svg>
+          Back
+        </button>
+
         <h1 className="text-3xl font-bold mb-6">Book Your Move</h1>
 
         {/* Service Type Selection */}
@@ -253,47 +314,34 @@ export default function BookingPage({ params }: { params: { companyId: string } 
               {/* Current Number of Movers */}
               <div>
                 <div className="flex items-center justify-between mb-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                      Currently selected movers
-                    </label>
-                    <div className="text-gray-600">
-                      {numberOfMovers} movers selected from previous step
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => setNumberOfMovers(initialMovers)}
-                    className="text-sm text-blue-600 hover:text-blue-800"
-                    type="button"
-                  >
-                    Reset to initial selection
-                  </button>
+                  <label className="block text-sm font-medium text-gray-700">
+                    Number of Movers
+                  </label>
                 </div>
                 
-                <div className="bg-blue-50 p-4 rounded-lg mb-4">
-                  <p className="text-sm text-blue-800">
-                    You can adjust the number of movers to see how it affects the estimated time and total cost:
-                  </p>
+                <div className="flex items-center justify-center gap-4 mb-2">
+                  <button
+                    type="button"
+                    onClick={() => handleMoversChange(Math.max(2, numberOfMovers - 1))}
+                    className="w-12 h-12 rounded-lg bg-gray-100 text-gray-700 hover:bg-gray-200 flex items-center justify-center text-2xl disabled:opacity-50 disabled:cursor-not-allowed"
+                    disabled={numberOfMovers <= 2}
+                  >
+                    -
+                  </button>
+                  <div className="text-3xl font-semibold w-20 text-center">
+                    {numberOfMovers}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => handleMoversChange(Math.min(5, numberOfMovers + 1))}
+                    className="w-12 h-12 rounded-lg bg-gray-100 text-gray-700 hover:bg-gray-200 flex items-center justify-center text-2xl disabled:opacity-50 disabled:cursor-not-allowed"
+                    disabled={numberOfMovers >= 5}
+                  >
+                    +
+                  </button>
                 </div>
-
-                <div className="flex items-center space-x-4">
-                  {[2, 3, 4, 5].map((num) => (
-                    <button
-                      key={num}
-                      type="button"
-                      onClick={() => handleMoversChange(num)}
-                      className={`px-4 py-2 rounded-lg ${
-                        numberOfMovers === num
-                          ? 'bg-blue-500 text-white'
-                          : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                      }`}
-                    >
-                      {num} Movers
-                    </button>
-                  ))}
-                </div>
-                <p className="mt-2 text-sm text-gray-500">
-                  More movers can reduce the total time needed, affecting the final cost
+                <p className="mt-2 text-sm text-gray-500 text-center">
+                  Minimum 2, maximum 5 movers
                 </p>
               </div>
 
@@ -328,22 +376,30 @@ export default function BookingPage({ params }: { params: { companyId: string } 
                     <label className="block text-sm font-medium text-gray-700 mb-2">
                       Number of Bedrooms
                     </label>
-                    <div className="flex items-center space-x-3">
-                      {[1, 2, 3, 4, 5].map((num) => (
-                        <button
-                          key={num}
-                          type="button"
-                          onClick={() => handlePropertyChange({ bedrooms: num })}
-                          className={`w-12 h-12 rounded-full flex items-center justify-center ${
-                            property.bedrooms === num
-                              ? 'bg-blue-500 text-white'
-                              : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                          }`}
-                        >
-                          {num}
-                        </button>
-                      ))}
+                    <div className="flex items-center justify-center gap-4 mb-2">
+                      <button
+                        type="button"
+                        onClick={() => handlePropertyChange({ bedrooms: Math.max(1, property.bedrooms - 1) })}
+                        className="w-12 h-12 rounded-lg bg-gray-100 text-gray-700 hover:bg-gray-200 flex items-center justify-center text-2xl disabled:opacity-50 disabled:cursor-not-allowed"
+                        disabled={property.bedrooms <= 1}
+                      >
+                        -
+                      </button>
+                      <div className="text-3xl font-semibold w-20 text-center">
+                        {property.bedrooms}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handlePropertyChange({ bedrooms: Math.min(7, property.bedrooms + 1) })}
+                        className="w-12 h-12 rounded-lg bg-gray-100 text-gray-700 hover:bg-gray-200 flex items-center justify-center text-2xl disabled:opacity-50 disabled:cursor-not-allowed"
+                        disabled={property.bedrooms >= 7}
+                      >
+                        +
+                      </button>
                     </div>
+                    <p className="mt-2 text-sm text-gray-500 text-center">
+                      Maximum 7 bedrooms
+                    </p>
                   </div>
                 )}
 
@@ -366,7 +422,7 @@ export default function BookingPage({ params }: { params: { companyId: string } 
                     </button>
                     <button
                       type="button"
-                      onClick={() => handlePropertyChange({ hasStairs: false })}
+                      onClick={() => handlePropertyChange({ hasStairs: false, numberOfFlights: undefined })}
                       className={`px-4 py-2 rounded-lg ${
                         property.hasStairs === false
                           ? 'bg-blue-500 text-white'
@@ -377,6 +433,39 @@ export default function BookingPage({ params }: { params: { companyId: string } 
                     </button>
                   </div>
                 </div>
+
+                {/* Number of Flights */}
+                {property.hasStairs && (
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Number of Flights of Stairs
+                    </label>
+                    <div className="flex items-center justify-center gap-4 mb-2">
+                      <button
+                        type="button"
+                        onClick={() => handlePropertyChange({ numberOfFlights: Math.max(1, (property.numberOfFlights || 1) - 1) })}
+                        className="w-12 h-12 rounded-lg bg-gray-100 text-gray-700 hover:bg-gray-200 flex items-center justify-center text-2xl disabled:opacity-50 disabled:cursor-not-allowed"
+                        disabled={(property.numberOfFlights || 1) <= 1}
+                      >
+                        -
+                      </button>
+                      <div className="text-3xl font-semibold w-20 text-center">
+                        {property.numberOfFlights || 1}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handlePropertyChange({ numberOfFlights: Math.min(5, (property.numberOfFlights || 1) + 1) })}
+                        className="w-12 h-12 rounded-lg bg-gray-100 text-gray-700 hover:bg-gray-200 flex items-center justify-center text-2xl disabled:opacity-50 disabled:cursor-not-allowed"
+                        disabled={(property.numberOfFlights || 1) >= 5}
+                      >
+                        +
+                      </button>
+                    </div>
+                    <p className="mt-2 text-sm text-gray-500 text-center">
+                      Each flight of stairs adds 30 minutes to the total time
+                    </p>
+                  </div>
+                )}
 
                 {/* Elevator Questions - Show for both apartment and studio */}
                 {(property.type === 'apartment' || property.type === 'studio') && (
@@ -501,26 +590,29 @@ export default function BookingPage({ params }: { params: { companyId: string } 
               {/* Show Estimation Results */}
               {estimatedHours && (
                 <div className="mt-6 p-4 bg-blue-50 rounded-lg">
-                  <h3 className="font-semibold text-blue-900 mb-2">
-                    Estimated Time: {estimatedHours} hours with {numberOfMovers} movers
+                  <h3 className="text-lg font-semibold text-blue-900 mb-2">
+                    Estimated Time Breakdown
                   </h3>
-                  <div className="text-sm text-blue-700 space-y-3">
-                    <p>
-                      This estimate is based on having {numberOfMovers} movers working together. 
-                      {numberOfMovers < 5 && ' Adding more movers can help complete the job faster.'}
+                  <div className="space-y-2">
+                    {estimationBreakdown.map((detail, index) => (
+                      <p key={index} className="text-blue-800">
+                        {detail}
+                      </p>
+                    ))}
+                    <p className="text-lg font-semibold text-blue-900 mt-4">
+                      Total estimated time: {estimatedHours} hours
                     </p>
-                    <p>
-                      Note: This is just an estimate. Actual time may vary depending on factors such as:
-                    </p>
-                    <ul className="list-disc pl-5 space-y-1">
-                      <li>Distance from truck to property</li>
-                      <li>Property access conditions</li>
-                      <li>Volume and type of items</li>
-                      <li>Packing status of items</li>
-                      <li>Weather conditions</li>
-                      {property.type === 'apartment' && <li>Elevator availability and restrictions</li>}
-                    </ul>
                   </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setHours(estimatedHours);
+                      setShowEstimator(false);
+                    }}
+                    className="mt-4 w-full bg-blue-600 text-white py-2 px-4 rounded-lg hover:bg-blue-700 transition"
+                  >
+                    Use this estimate
+                  </button>
                 </div>
               )}
             </div>
@@ -554,6 +646,7 @@ export default function BookingPage({ params }: { params: { companyId: string } 
             {/* Continue Button */}
             <div className="relative">
               <button
+                onClick={handleBookingConfirm}
                 className={`w-full py-4 px-6 rounded-xl transition text-lg font-semibold flex items-center justify-center gap-2 mt-6 ${
                   serviceType 
                     ? 'bg-blue-600 text-white hover:bg-blue-700'
@@ -562,7 +655,7 @@ export default function BookingPage({ params }: { params: { companyId: string } 
                 disabled={!serviceType}
                 title={!serviceType ? "Please select a service type above to continue" : ""}
               >
-                Continue to Schedule Your Move
+                Continue to Details
                 <svg 
                   className={`w-5 h-5 ${!serviceType ? 'opacity-50' : ''}`} 
                   fill="none" 

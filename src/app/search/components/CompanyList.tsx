@@ -2,8 +2,7 @@
 
 import { useState } from 'react'
 import Link from 'next/link'
-
-interface CompanyListProps {}
+import { useRouter } from 'next/navigation'
 
 interface Company {
   id: number
@@ -57,6 +56,7 @@ function StarRating({ rating }: { rating: number }) {
 
 export default function CompanyList() {
   const [numberOfMovers, setNumberOfMovers] = useState(2)
+  const router = useRouter()
 
   return (
     <div className="space-y-6">
@@ -66,7 +66,7 @@ export default function CompanyList() {
           Number of Movers
         </label>
         <div className="flex items-center space-x-4">
-          {[2, 3, 4, 5].map((number) => (
+          {[2, 3, 4].map((number) => (
             <button
               key={number}
               onClick={() => setNumberOfMovers(number)}
@@ -83,7 +83,7 @@ export default function CompanyList() {
       </div>
 
       {mockCompanies.map(company => {
-        const totalPrice = company.pricePerHour * numberOfMovers
+        const hourlyPrice = company.pricePerHour * numberOfMovers;
         
         return (
           <div key={company.id} className="bg-white rounded-xl shadow-sm overflow-hidden hover:shadow-md transition">
@@ -107,9 +107,9 @@ export default function CompanyList() {
                     <div className="text-sm text-gray-600">{company.reviewCount} reviews</div>
                   </div>
                   <div className="text-right">
-                    <div className="text-2xl font-bold text-gray-900">${totalPrice}</div>
+                    <div className="text-2xl font-bold text-gray-900">${hourlyPrice}</div>
                     <div className="text-sm text-gray-500">per hour for {numberOfMovers} movers</div>
-                    <div className="text-xs text-gray-400">(${company.pricePerHour} per mover)</div>
+                    <div className="text-xs text-gray-400">(${company.pricePerHour} per mover per hour)</div>
                   </div>
                 </div>
 
